@@ -4,17 +4,16 @@ const ju = @import("zig_util").json;
 
 const MAX_INPUT: usize = 1024 * 1024;
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var stdin_file = std.fs.File.stdin();
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
     var buf: [4096]u8 = undefined;
-    var reader = stdin_file.reader(&buf);
-    var data = std.ArrayList(u8){};
+    var stdin_reader = std.Io.File.stdin().readerStreaming(io, &buf);
+    var data = std.ArrayList(u8).empty;
     defer data.deinit(allocator);
-    reader.interface.appendRemaining(allocator, &data, .limited(MAX_INPUT)) catch {};
+    stdin_reader.interface.appendRemaining(allocator, &data, .limited(MAX_INPUT)) catch {};
 
     const out = try process(allocator, data.items);
     if (out.len > 0) {
-        try std.fs.File.stdout().writeAll(out);
+        try std.Io.File.stdout().writeStreamingAll(io, out);
     }
 }
 
@@ -35,7 +34,7 @@ pub fn process(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
 }
 
 fn buildHookOutput(allocator: std.mem.Allocator, new_command: []const u8) ![]const u8 {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     errdefer buf.deinit(allocator);
 
     try buf.appendSlice(allocator,
@@ -70,7 +69,7 @@ fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []
 
 test "appendJsonString escapes quotes and backslashes" {
     const allocator = std.testing.allocator;
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
     try appendJsonString(allocator, &buf, "a\"b\\c");
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\"", buf.items);
@@ -78,7 +77,7 @@ test "appendJsonString escapes quotes and backslashes" {
 
 test "appendJsonString escapes newline" {
     const allocator = std.testing.allocator;
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
     try appendJsonString(allocator, &buf, "line1\nline2");
     try std.testing.expectEqualStrings("\"line1\\nline2\"", buf.items);

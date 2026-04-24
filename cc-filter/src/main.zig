@@ -14,36 +14,35 @@ const Usage =
     \\
 ;
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
+    const args = try init.minimal.args.toSlice(allocator);
 
     if (args.len < 2) {
-        try std.fs.File.stderr().writeAll(Usage);
+        try std.Io.File.stderr().writeStreamingAll(io, Usage);
         std.process.exit(2);
     }
 
     const sub = args[1];
     if (std.mem.eql(u8, sub, "hook")) {
-        try hook.run(allocator);
+        try hook.run(allocator, io);
     } else if (std.mem.eql(u8, sub, "stream")) {
         const kind = parseStreamKind(args[2..]) orelse {
-            try std.fs.File.stderr().writeAll("cc-filter: stream requires -k <kind>\n");
+            try std.Io.File.stderr().writeStreamingAll(io, "cc-filter: stream requires -k <kind>\n");
             std.process.exit(2);
         };
-        try stream.run(allocator, kind);
+        try stream.run(allocator, io, kind);
     } else if (std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
-        try std.fs.File.stdout().writeAll(Usage);
+        try std.Io.File.stdout().writeStreamingAll(io, Usage);
     } else {
-        try std.fs.File.stderr().writeAll(Usage);
+        try std.Io.File.stderr().writeStreamingAll(io, Usage);
         std.process.exit(2);
     }
 }
 
-fn parseStreamKind(args: []const []const u8) ?[]const u8 {
+fn parseStreamKind(args: []const [:0]const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "-k") or std.mem.eql(u8, args[i], "--kind")) {
@@ -66,16 +65,16 @@ test {
 }
 
 test "parseStreamKind finds -k" {
-    const args = [_][]const u8{ "-k", "cargo-test" };
+    const args = [_][:0]const u8{ "-k", "cargo-test" };
     try std.testing.expectEqualStrings("cargo-test", parseStreamKind(&args).?);
 }
 
 test "parseStreamKind returns null without -k" {
-    const args = [_][]const u8{"cargo-test"};
+    const args = [_][:0]const u8{"cargo-test"};
     try std.testing.expect(parseStreamKind(&args) == null);
 }
 
 test "parseStreamKind returns null when -k has no value" {
-    const args = [_][]const u8{"-k"};
+    const args = [_][:0]const u8{"-k"};
     try std.testing.expect(parseStreamKind(&args) == null);
 }

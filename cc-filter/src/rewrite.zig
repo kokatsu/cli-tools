@@ -82,7 +82,7 @@ fn matchesFlag(token: []const u8, flag: []const u8) bool {
 
 fn prependEnv(allocator: std.mem.Allocator, env: []const u8, body: []const u8) ![]u8 {
     if (env.len == 0) return allocator.dupe(u8, body);
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, env);
     try buf.append(allocator, ' ');
@@ -99,7 +99,7 @@ fn stripEnvPrefix(input: []const u8) EnvSplit {
         cursor = next;
         cursor = skipSpaces(input, cursor);
     }
-    const env_end = std.mem.trimRight(u8, input[0..cursor], " ").len;
+    const env_end = std.mem.trimEnd(u8, input[0..cursor], " ").len;
     return .{ .env = input[0..env_end], .rest = input[cursor..] };
 }
 
@@ -124,7 +124,7 @@ fn skipSpaces(input: []const u8, start: usize) usize {
 
 fn substitute(allocator: std.mem.Allocator, template: []const u8, args: []const u8) ![]u8 {
     const idx = std.mem.indexOf(u8, template, ARGS_PLACEHOLDER) orelse return allocator.dupe(u8, template);
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, template[0..idx]);
     try buf.appendSlice(allocator, args);
@@ -135,7 +135,7 @@ fn substitute(allocator: std.mem.Allocator, template: []const u8, args: []const 
 fn stripPrefix(input: []const u8, prefix: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, input, prefix)) return "";
     if (std.mem.startsWith(u8, input, prefix) and input.len > prefix.len and input[prefix.len] == ' ') {
-        return std.mem.trimLeft(u8, input[prefix.len..], " ");
+        return std.mem.trimStart(u8, input[prefix.len..], " ");
     }
     return null;
 }

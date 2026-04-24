@@ -12,7 +12,7 @@ fn shouldKeep(line: []const u8) bool {
     if (isSummaryLine(line)) return true;
     if (isNumberedEntry(line)) return true;
     if (std.mem.indexOf(u8, line, "Failure/Error:") != null) return true;
-    const trimmed = std.mem.trimLeft(u8, line, " ");
+    const trimmed = std.mem.trimStart(u8, line, " ");
     if (std.mem.startsWith(u8, trimmed, "expected: ") or std.mem.startsWith(u8, trimmed, "got: ")) return true;
     if (std.mem.startsWith(u8, trimmed, "# ")) return true;
     if (std.mem.startsWith(u8, line, "rspec ") and std.mem.indexOf(u8, line, " # ") != null) return true;
@@ -20,7 +20,7 @@ fn shouldKeep(line: []const u8) bool {
 }
 
 fn isNumberedEntry(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " ");
+    const trimmed = std.mem.trimStart(u8, line, " ");
     if (trimmed.len == line.len) return false;
     var i: usize = 0;
     while (i < trimmed.len and std.ascii.isDigit(trimmed[i])) : (i += 1) {}

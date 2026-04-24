@@ -1,34 +1,34 @@
 const std = @import("std");
 const mem = std.mem;
-const fs = std.fs;
+const Io = std.Io;
 
 // ============================================================
 // TZif parser (pure Zig, no libc dependency)
 // ============================================================
 
 /// Resolve the current UTC offset in seconds for the given epoch timestamp.
-/// Reads the TZ environment variable and parses TZif binary data.
+/// Reads the TZ environment variable (via `env_map`) and parses TZif binary data.
 /// Falls back to POSIX fixed-offset TZ strings (e.g. "JST-9"), then
 /// /etc/localtime, then UTC (0) if nothing works.
-pub fn getUtcOffsetSeconds(allocator: std.mem.Allocator, now_s: i64) i32 {
-    if (std.posix.getenv("TZ")) |tz_raw| {
+pub fn getUtcOffsetSeconds(io: Io, env_map: *const std.process.Environ.Map, allocator: std.mem.Allocator, now_s: i64) i32 {
+    if (env_map.get("TZ")) |tz_raw| {
         const tz = if (tz_raw.len > 0 and tz_raw[0] == ':') tz_raw[1..] else tz_raw;
         if (tz.len == 0 or mem.eql(u8, tz, "UTC") or mem.eql(u8, tz, "UTC0")) return 0;
 
         if (tz.len > 0 and tz[0] == '/') {
-            if (readTzifOffset(allocator, tz, now_s)) |off| return off;
+            if (readTzifOffset(io, allocator, tz, now_s)) |off| return off;
         }
 
         var buf: [256]u8 = undefined;
         const path = std.fmt.bufPrint(&buf, "/usr/share/zoneinfo/{s}", .{tz}) catch null;
         if (path) |p| {
-            if (readTzifOffset(allocator, p, now_s)) |off| return off;
+            if (readTzifOffset(io, allocator, p, now_s)) |off| return off;
         }
 
         if (parsePosixTzFixed(tz)) |off| return off;
     }
 
-    if (readTzifOffset(allocator, "/etc/localtime", now_s)) |off| return off;
+    if (readTzifOffset(io, allocator, "/etc/localtime", now_s)) |off| return off;
     return 0;
 }
 
@@ -83,10 +83,12 @@ fn readUint(s: []const u8, pos: *usize) ?i32 {
     return std.fmt.parseInt(i32, s[start..pos.*], 10) catch null;
 }
 
-fn readTzifOffset(allocator: std.mem.Allocator, path: []const u8, now_s: i64) ?i32 {
-    const f = fs.openFileAbsolute(path, .{}) catch return null;
-    defer f.close();
-    const data = f.readToEndAlloc(allocator, 1024 * 1024) catch return null;
+fn readTzifOffset(io: Io, allocator: std.mem.Allocator, path: []const u8, now_s: i64) ?i32 {
+    const f = Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer f.close(io);
+    var buf: [4096]u8 = undefined;
+    var reader = f.readerStreaming(io, &buf);
+    const data = reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch return null;
     defer allocator.free(data);
     return parseTzif(data, now_s);
 }
@@ -295,8 +297,8 @@ test "parseTzif invalid data" {
 }
 
 test "parseTzif reads /etc/localtime" {
-    const now_s: i64 = @divFloor(std.time.milliTimestamp(), @as(i64, 1000));
-    if (readTzifOffset(std.testing.allocator, "/etc/localtime", now_s)) |offset| {
+    const now_s: i64 = std.Io.Clock.real.now(std.testing.io).toSeconds();
+    if (readTzifOffset(std.testing.io, std.testing.allocator, "/etc/localtime", now_s)) |offset| {
         try std.testing.expect(offset >= -14 * 3600 and offset <= 14 * 3600);
     }
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
-const Writer = std.io.Writer;
+const Writer = std.Io.Writer;
 const types = @import("types.zig");
 
 const RateLimitWindow = types.RateLimitWindow;
@@ -115,19 +115,19 @@ pub fn buildTheme(theme_name: ?[]const u8, overrides: ThemeOverrides) Theme {
     return theme;
 }
 
-pub fn initTheme() Theme {
+pub fn initTheme(env: *const std.process.Environ.Map) Theme {
     return buildTheme(
-        std.posix.getenv("CC_STATUSLINE_THEME"),
+        env.get("CC_STATUSLINE_THEME"),
         .{
-            .model = std.posix.getenv("CC_STATUSLINE_COLOR_MODEL"),
-            .green = std.posix.getenv("CC_STATUSLINE_COLOR_GREEN"),
-            .yellow = std.posix.getenv("CC_STATUSLINE_COLOR_YELLOW"),
-            .red = std.posix.getenv("CC_STATUSLINE_COLOR_RED"),
-            .dim = std.posix.getenv("CC_STATUSLINE_COLOR_DIM"),
-            .bar_filled = std.posix.getenv("CC_STATUSLINE_BAR_FILLED"),
-            .bar_transition = std.posix.getenv("CC_STATUSLINE_BAR_TRANSITION"),
-            .bar_empty = std.posix.getenv("CC_STATUSLINE_BAR_EMPTY"),
-            .branch_max = std.posix.getenv("CC_STATUSLINE_BRANCH_MAX"),
+            .model = env.get("CC_STATUSLINE_COLOR_MODEL"),
+            .green = env.get("CC_STATUSLINE_COLOR_GREEN"),
+            .yellow = env.get("CC_STATUSLINE_COLOR_YELLOW"),
+            .red = env.get("CC_STATUSLINE_COLOR_RED"),
+            .dim = env.get("CC_STATUSLINE_COLOR_DIM"),
+            .bar_filled = env.get("CC_STATUSLINE_BAR_FILLED"),
+            .bar_transition = env.get("CC_STATUSLINE_BAR_TRANSITION"),
+            .bar_empty = env.get("CC_STATUSLINE_BAR_EMPTY"),
+            .branch_max = env.get("CC_STATUSLINE_BRANCH_MAX"),
         },
     );
 }

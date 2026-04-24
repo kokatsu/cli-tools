@@ -8,7 +8,7 @@ pub fn filter(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 fn shouldKeep(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " ");
+    const trimmed = std.mem.trimStart(u8, line, " ");
     if (std.mem.startsWith(u8, trimmed, "(fail) ")) return true;
     if (std.mem.startsWith(u8, trimmed, FAIL_MARK)) return true;
     if (std.mem.startsWith(u8, line, "error:")) return true;

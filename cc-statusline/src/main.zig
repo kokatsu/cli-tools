@@ -1,7 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const mem = std.mem;
-const fs = std.fs;
+const Io = std.Io;
 const output = @import("output.zig");
 const scan = @import("scan.zig");
 const time = @import("time.zig");
@@ -80,19 +80,19 @@ fn parseStdin(allocator: std.mem.Allocator, data: []const u8) StdinInfo {
 // Git Branch Detection
 // ============================================================
 
-fn getGitBranch(buf: *[256]u8, cwd: []const u8) ?[]const u8 {
+fn getGitBranch(io: std.Io, buf: *[256]u8, cwd: []const u8) ?[]const u8 {
     // Walk up from cwd looking for .git/HEAD
     var path_buf: [4096]u8 = undefined;
     var dir = cwd;
 
     while (true) {
         const head_path = std.fmt.bufPrint(&path_buf, "{s}/.git/HEAD", .{dir}) catch return null;
-        if (readGitHead(buf, head_path)) |branch| return branch;
+        if (readGitHead(io, buf, head_path)) |branch| return branch;
 
         // Move to parent directory
         if (mem.lastIndexOfScalar(u8, dir, '/')) |sep| {
             if (sep == 0) {
-                return readGitHead(buf, "/.git/HEAD");
+                return readGitHead(io, buf, "/.git/HEAD");
             }
             dir = dir[0..sep];
         } else {
@@ -101,11 +101,15 @@ fn getGitBranch(buf: *[256]u8, cwd: []const u8) ?[]const u8 {
     }
 }
 
-fn readGitHead(buf: *[256]u8, path: []const u8) ?[]const u8 {
-    var f = fs.openFileAbsolute(path, .{}) catch return null;
-    defer f.close();
-    const len = f.readAll(buf) catch return null;
-    return parseGitHead(buf[0..len]);
+fn readGitHead(io: std.Io, buf: *[256]u8, path: []const u8) ?[]const u8 {
+    var f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer f.close(io);
+    var reader = f.readerStreaming(io, buf);
+    const data = reader.interface.allocRemaining(std.heap.page_allocator, .limited(256)) catch return null;
+    defer std.heap.page_allocator.free(data);
+    const n = @min(data.len, buf.len);
+    @memcpy(buf[0..n], data[0..n]);
+    return parseGitHead(buf[0..n]);
 }
 
 fn parseGitHead(raw: []const u8) ?[]const u8 {
@@ -130,43 +134,42 @@ fn parseGitHead(raw: []const u8) ?[]const u8 {
 // Main
 // ============================================================
 
-pub fn main() void {
-    mainImpl() catch {
-        const stdout = fs.File{ .handle = std.posix.STDOUT_FILENO };
+pub fn main(init: std.process.Init) void {
+    const io = init.io;
+    mainImpl(init) catch {
         var buf: [256]u8 = undefined;
-        var writer = stdout.writer(&buf);
+        var writer = std.Io.File.stdout().writerStreaming(io, &buf);
         output.printFallback(&writer.interface);
         writer.interface.flush() catch {};
     };
 }
 
-fn mainImpl() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+fn mainImpl(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const io = init.io;
 
-    const theme = output.initTheme();
+    const theme = output.initTheme(init.environ_map);
 
     // Read stdin
-    const stdin = fs.File{ .handle = std.posix.STDIN_FILENO };
-    const stdin_data = stdin.readToEndAlloc(allocator, 1024 * 1024) catch &.{};
+    var stdin_buf: [8192]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().readerStreaming(io, &stdin_buf);
+    const stdin_data = stdin_reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch &.{};
 
     // Parse stdin JSON
     const stdin_info = parseStdin(allocator, stdin_data);
 
-    const now_ms = std.time.milliTimestamp();
+    const now_ms: i64 = std.Io.Clock.real.now(io).toMilliseconds();
 
     // Scan transcripts (or use cache)
     const resets_at_ms: ?i64 = if (stdin_info.rate_limit_5h) |rl| rl.resets_at_ms else null;
-    const scan_result = scan.scanTranscripts(allocator, now_ms, resets_at_ms);
+    const scan_result = scan.scanTranscripts(io, init.environ_map, allocator, now_ms, resets_at_ms);
 
     // Resolve git branch
     var branch_buf: [256]u8 = undefined;
-    const git_branch: ?[]const u8 = if (stdin_info.cwd) |cwd| getGitBranch(&branch_buf, cwd) else null;
+    const git_branch: ?[]const u8 = if (stdin_info.cwd) |cwd| getGitBranch(io, &branch_buf, cwd) else null;
 
-    const stdout = fs.File{ .handle = std.posix.STDOUT_FILENO };
     var buf: [4096]u8 = undefined;
-    var writer = stdout.writer(&buf);
+    var writer = std.Io.File.stdout().writerStreaming(io, &buf);
     try output.printOutput(&writer.interface, theme, stdin_info, scan_result, now_ms, git_branch);
     try writer.interface.flush();
 }
@@ -353,62 +356,65 @@ test "parseStdin invalid json" {
 // --- getGitBranch ---
 
 test "getGitBranch finds .git/HEAD in current directory" {
+    const io = std.testing.io;
     const base = "/tmp/cc-test-gitbranch";
     const git_dir = base ++ "/.git";
     const head_path = git_dir ++ "/HEAD";
-    fs.makeDirAbsolute(base) catch {};
-    fs.makeDirAbsolute(git_dir) catch {};
+    Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    Io.Dir.createDirAbsolute(io, git_dir, .default_dir) catch {};
     defer {
-        fs.deleteFileAbsolute(head_path) catch {};
-        fs.deleteDirAbsolute(git_dir) catch {};
-        fs.deleteDirAbsolute(base) catch {};
+        Io.Dir.deleteFileAbsolute(io, head_path) catch {};
+        Io.Dir.deleteDirAbsolute(io, git_dir) catch {};
+        Io.Dir.deleteDirAbsolute(io, base) catch {};
     }
     {
-        var f = try fs.createFileAbsolute(head_path, .{});
-        defer f.close();
-        try f.writeAll("ref: refs/heads/main\n");
+        var f = try Io.Dir.createFileAbsolute(io, head_path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "ref: refs/heads/main\n");
     }
     var buf: [256]u8 = undefined;
-    const branch = getGitBranch(&buf, base);
+    const branch = getGitBranch(io, &buf, base);
     try std.testing.expect(branch != null);
     try std.testing.expectEqualStrings("main", branch.?);
 }
 
 test "getGitBranch walks up to parent" {
+    const io = std.testing.io;
     const base = "/tmp/cc-test-gitbranch-walk";
     const git_dir = base ++ "/.git";
     const head_path = git_dir ++ "/HEAD";
     const sub_dir = base ++ "/sub";
     const sub_sub = base ++ "/sub/dir";
-    fs.makeDirAbsolute(base) catch {};
-    fs.makeDirAbsolute(git_dir) catch {};
-    fs.makeDirAbsolute(sub_dir) catch {};
-    fs.makeDirAbsolute(sub_sub) catch {};
+    Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    Io.Dir.createDirAbsolute(io, git_dir, .default_dir) catch {};
+    Io.Dir.createDirAbsolute(io, sub_dir, .default_dir) catch {};
+    Io.Dir.createDirAbsolute(io, sub_sub, .default_dir) catch {};
     defer {
-        fs.deleteFileAbsolute(head_path) catch {};
-        fs.deleteDirAbsolute(git_dir) catch {};
-        fs.deleteDirAbsolute(sub_sub) catch {};
-        fs.deleteDirAbsolute(sub_dir) catch {};
-        fs.deleteDirAbsolute(base) catch {};
+        Io.Dir.deleteFileAbsolute(io, head_path) catch {};
+        Io.Dir.deleteDirAbsolute(io, git_dir) catch {};
+        Io.Dir.deleteDirAbsolute(io, sub_sub) catch {};
+        Io.Dir.deleteDirAbsolute(io, sub_dir) catch {};
+        Io.Dir.deleteDirAbsolute(io, base) catch {};
     }
     {
-        var f = try fs.createFileAbsolute(head_path, .{});
-        defer f.close();
-        try f.writeAll("ref: refs/heads/feature-x\n");
+        var f = try Io.Dir.createFileAbsolute(io, head_path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "ref: refs/heads/feature-x\n");
     }
     var buf: [256]u8 = undefined;
-    const branch = getGitBranch(&buf, sub_sub);
+    const branch = getGitBranch(io, &buf, sub_sub);
     try std.testing.expect(branch != null);
     try std.testing.expectEqualStrings("feature-x", branch.?);
 }
 
 test "getGitBranch returns null when no .git/HEAD" {
+    const io = std.testing.io;
     const base = "/tmp/cc-test-gitbranch-empty";
-    fs.makeDirAbsolute(base) catch {};
-    defer fs.deleteDirAbsolute(base) catch {};
+    Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer Io.Dir.deleteDirAbsolute(io, base) catch {};
     var buf: [256]u8 = undefined;
     // /tmp has no .git/HEAD, neither does /
-    try std.testing.expectEqual(@as(?[]const u8, null), getGitBranch(&buf, base));
+    try std.testing.expectEqual(@as(?[]const u8, null), getGitBranch(io, &buf, base));
 }
 
 test {

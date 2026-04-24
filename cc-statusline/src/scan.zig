@@ -1,11 +1,15 @@
 const std = @import("std");
 const json = std.json;
 const mem = std.mem;
-const fs = std.fs;
+const Io = std.Io;
 const pricing = @import("pricing.zig");
 const time = @import("time.zig");
 const types = @import("types.zig");
 const ju = @import("zig_util").json;
+
+// Module-level io handle: cc-statusline is single-threaded and scanning touches
+// dozens of callsites, so threading io through every helper balloons the diff.
+var g_io: Io = undefined;
 
 const ScanResult = types.ScanResult;
 const BlockInfo = types.BlockInfo;
@@ -69,8 +73,8 @@ fn resolveConfigDir(allocator: std.mem.Allocator, claude_config_dir: ?[]const u8
     return try std.fmt.allocPrint(allocator, "{s}/.claude", .{h});
 }
 
-fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
-    return resolveConfigDir(allocator, std.posix.getenv("CLAUDE_CONFIG_DIR"), std.posix.getenv("HOME"));
+fn getConfigDir(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) ![]const u8 {
+    return resolveConfigDir(allocator, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
 }
 
 const FileInfo = struct {
@@ -84,23 +88,22 @@ fn logOpendirError(path: []const u8, err: anyerror) void {
     if (err == error.FileNotFound) return;
     var buf: [512]u8 = undefined;
     if (std.fmt.bufPrint(&buf, "cc-statusline: opendir {s} failed: {s}\n", .{ path, @errorName(err) })) |msg| {
-        const f = fs.File{ .handle = std.posix.STDERR_FILENO };
-        f.writeAll(msg) catch {};
+        Io.File.stderr().writeStreamingAll(g_io, msg) catch {};
     } else |_| {}
 }
 
 fn collectTranscriptFiles(allocator: std.mem.Allocator, projects_path: []const u8, now_ms: i64) []FileInfo {
-    var files: std.ArrayListUnmanaged(FileInfo) = .{};
+    var files: std.ArrayList(FileInfo) = .empty;
     const cutoff_ms = now_ms - scan_window_ms;
 
-    var projects_dir = fs.openDirAbsolute(projects_path, .{ .iterate = true }) catch |err| {
+    var projects_dir = Io.Dir.openDirAbsolute(g_io, projects_path, .{ .iterate = true }) catch |err| {
         logOpendirError(projects_path, err);
         return files.toOwnedSlice(allocator) catch &.{};
     };
-    defer projects_dir.close();
+    defer projects_dir.close(g_io);
 
     var proj_it = projects_dir.iterate();
-    while (proj_it.next() catch null) |proj_entry| {
+    while (proj_it.next(g_io) catch null) |proj_entry| {
         if (proj_entry.kind != .directory) continue;
         const proj_name = allocator.dupe(u8, proj_entry.name) catch continue;
         scanDirRecursive(allocator, projects_path, proj_name, &files, cutoff_ms);
@@ -109,23 +112,23 @@ fn collectTranscriptFiles(allocator: std.mem.Allocator, projects_path: []const u
     return files.toOwnedSlice(allocator) catch &.{};
 }
 
-fn scanDirRecursive(allocator: std.mem.Allocator, base_path: []const u8, rel_path: []const u8, files: *std.ArrayListUnmanaged(FileInfo), cutoff_ms: i64) void {
+fn scanDirRecursive(allocator: std.mem.Allocator, base_path: []const u8, rel_path: []const u8, files: *std.ArrayList(FileInfo), cutoff_ms: i64) void {
     const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, rel_path }) catch return;
-    var dir = fs.openDirAbsolute(full_path, .{ .iterate = true }) catch |err| {
+    var dir = Io.Dir.openDirAbsolute(g_io, full_path, .{ .iterate = true }) catch |err| {
         logOpendirError(full_path, err);
         return;
     };
-    defer dir.close();
+    defer dir.close(g_io);
 
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(g_io) catch null) |entry| {
         if (entry.kind == .directory) {
             const sub_rel = std.fmt.allocPrint(allocator, "{s}/{s}", .{ rel_path, entry.name }) catch continue;
             scanDirRecursive(allocator, base_path, sub_rel, files, cutoff_ms);
         } else if (entry.kind == .file and mem.endsWith(u8, entry.name, ".jsonl")) {
-            const stat = dir.statFile(entry.name) catch continue;
+            const stat = dir.statFile(g_io, entry.name, .{}) catch continue;
 
-            const mtime_ms: i64 = @intCast(@divFloor(stat.mtime, std.time.ns_per_ms));
+            const mtime_ms: i64 = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_ms));
             if (mtime_ms < cutoff_ms) continue;
 
             const abs_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ full_path, entry.name }) catch continue;
@@ -134,7 +137,7 @@ fn scanDirRecursive(allocator: std.mem.Allocator, base_path: []const u8, rel_pat
     }
 }
 
-fn parseJsonlContent(allocator: std.mem.Allocator, dedup_alloc: std.mem.Allocator, content: []const u8, entries: *std.ArrayListUnmanaged(TranscriptEntry), seen: *std.StringHashMapUnmanaged(void)) void {
+fn parseJsonlContent(allocator: std.mem.Allocator, dedup_alloc: std.mem.Allocator, content: []const u8, entries: *std.ArrayList(TranscriptEntry), seen: *std.StringHashMapUnmanaged(void)) void {
     var lines = mem.splitSequence(u8, content, "\n");
     while (lines.next()) |line| {
         if (line.len == 0) continue;
@@ -353,7 +356,7 @@ fn parseCacheBytes(allocator: std.mem.Allocator, content: []const u8, day_start_
     }
 
     // Read file entries
-    var files: std.ArrayListUnmanaged(CachedFileEntry) = .{};
+    var files: std.ArrayList(CachedFileEntry) = .empty;
     var i: u32 = 0;
     while (i < file_count) : (i += 1) {
         if (pos + 2 > content.len) break;
@@ -383,9 +386,11 @@ fn parseCacheBytes(allocator: std.mem.Allocator, content: []const u8, day_start_
 }
 
 fn readCache(allocator: std.mem.Allocator, day_start_ms: i64) ?CacheResult {
-    var f = fs.openFileAbsolute(cache_path, .{}) catch return null;
-    defer f.close();
-    const content = f.readToEndAlloc(allocator, cache_max_bytes) catch return null;
+    var f = Io.Dir.openFileAbsolute(g_io, cache_path, .{}) catch return null;
+    defer f.close(g_io);
+    var rbuf: [4096]u8 = undefined;
+    var reader = f.readerStreaming(g_io, &rbuf);
+    const content = reader.interface.allocRemaining(allocator, .limited(cache_max_bytes)) catch return null;
     return parseCacheBytes(allocator, content, day_start_ms);
 }
 
@@ -424,24 +429,25 @@ fn serializeCacheBytes(w: anytype, result: ScanResult, files: []const CachedFile
 
 fn writeCache(result: ScanResult, files: []const CachedFileEntry, now_s: i64, last_full_scan_s: i64, day_start_ms: i64) void {
     const tmp_path = cache_path ++ ".tmp";
-    var f = fs.createFileAbsolute(tmp_path, .{}) catch return;
-    defer f.close();
+    var f = Io.Dir.createFileAbsolute(g_io, tmp_path, .{}) catch return;
+    defer f.close(g_io);
     var wbuf: [8192]u8 = undefined;
-    var writer = f.writer(&wbuf);
+    var writer = f.writerStreaming(g_io, &wbuf);
     serializeCacheBytes(&writer.interface, result, files, now_s, last_full_scan_s, day_start_ms) catch return;
     writer.interface.flush() catch return;
-    fs.renameAbsolute(tmp_path, cache_path) catch {};
+    Io.Dir.renameAbsolute(tmp_path, cache_path, g_io) catch {};
 }
 
 // ============================================================
 // Scan Orchestration
 // ============================================================
 
-pub fn scanTranscripts(allocator: std.mem.Allocator, now_ms: i64, resets_at_ms: ?i64) ?ScanResult {
-    const config_dir = getConfigDir(allocator) catch return null;
+pub fn scanTranscripts(io: Io, env: *const std.process.Environ.Map, allocator: std.mem.Allocator, now_ms: i64, resets_at_ms: ?i64) ?ScanResult {
+    g_io = io;
+    const config_dir = getConfigDir(allocator, env) catch return null;
     const projects_path = std.fmt.allocPrint(allocator, "{s}/projects", .{config_dir}) catch return null;
     const now_s = @divFloor(now_ms, @as(i64, 1000));
-    const day_start_ms = time.getLocalDayStartMs(allocator, now_ms);
+    const day_start_ms = time.getLocalDayStartMs(io, env, allocator, now_ms);
 
     // Try cache — TTL check before any I/O
     if (readCache(allocator, day_start_ms)) |cached| {
@@ -469,11 +475,11 @@ fn diffScan(allocator: std.mem.Allocator, cached: CacheResult, now_ms: i64, now_
         }
     }
 
-    var changed: std.StringHashMapUnmanaged(CachedFileEntry) = .{};
+    var changed: std.StringHashMapUnmanaged(CachedFileEntry) = .empty;
     var any_shrunk = false;
 
     for (cached.files) |entry| {
-        const stat = fs.cwd().statFile(entry.path) catch {
+        const stat = Io.Dir.cwd().statFile(g_io, entry.path, .{}) catch {
             any_shrunk = true;
             break;
         };
@@ -499,20 +505,22 @@ fn diffScan(allocator: std.mem.Allocator, cached: CacheResult, now_ms: i64, now_
     }
 
     var block_diff_cost: f64 = 0;
-    var new_files: std.ArrayListUnmanaged(CachedFileEntry) = .{};
-    var global_seen = std.StringHashMapUnmanaged(void){};
+    var new_files: std.ArrayList(CachedFileEntry) = .empty;
+    var global_seen: std.StringHashMapUnmanaged(void) = .empty;
 
     for (cached.files) |entry| {
         if (changed.get(entry.path)) |ch| {
-            var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+            var entries: std.ArrayList(TranscriptEntry) = .empty;
 
             parse_file: {
-                var f = fs.openFileAbsolute(ch.path, .{}) catch break :parse_file;
-                defer f.close();
+                var f = Io.Dir.openFileAbsolute(g_io, ch.path, .{}) catch break :parse_file;
+                defer f.close(g_io);
+                var rbuf: [8192]u8 = undefined;
+                var reader = f.reader(g_io, &rbuf);
                 if (ch.parsed_size > 0) {
-                    f.seekTo(@intCast(ch.parsed_size)) catch break :parse_file;
+                    reader.seekTo(@intCast(ch.parsed_size)) catch break :parse_file;
                 }
-                const content = f.readToEndAlloc(allocator, 100 * 1024 * 1024) catch break :parse_file;
+                const content = reader.interface.allocRemaining(allocator, .limited(100 * 1024 * 1024)) catch break :parse_file;
                 if (content.len > 0) {
                     parseJsonlContent(allocator, allocator, content, &entries, &global_seen);
                 }
@@ -572,23 +580,25 @@ fn diffScan(allocator: std.mem.Allocator, cached: CacheResult, now_ms: i64, now_
 
 fn fullScan(allocator: std.mem.Allocator, projects_path: []const u8, now_ms: i64, now_s: i64, day_start_ms: i64, resets_at_ms: ?i64) ScanResult {
     const file_infos = collectTranscriptFiles(allocator, projects_path, now_ms);
-    var all_entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
-    var cache_files: std.ArrayListUnmanaged(CachedFileEntry) = .{};
+    var all_entries: std.ArrayList(TranscriptEntry) = .empty;
+    var cache_files: std.ArrayList(CachedFileEntry) = .empty;
     var total_today_cost: f64 = 0;
 
     var tmp_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer tmp_arena.deinit();
-    var global_seen = std.StringHashMapUnmanaged(void){};
+    var global_seen: std.StringHashMapUnmanaged(void) = .empty;
 
     for (file_infos) |fi| {
         _ = tmp_arena.reset(.retain_capacity);
         const tmp = tmp_arena.allocator();
 
-        var f = fs.openFileAbsolute(fi.path, .{}) catch continue;
-        defer f.close();
-        const content = f.readToEndAlloc(tmp, 100 * 1024 * 1024) catch continue;
+        var f = Io.Dir.openFileAbsolute(g_io, fi.path, .{}) catch continue;
+        defer f.close(g_io);
+        var rbuf: [8192]u8 = undefined;
+        var reader = f.readerStreaming(g_io, &rbuf);
+        const content = reader.interface.allocRemaining(tmp, .limited(100 * 1024 * 1024)) catch continue;
 
-        var file_entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+        var file_entries: std.ArrayList(TranscriptEntry) = .empty;
         parseJsonlContent(tmp, allocator, content, &file_entries, &global_seen);
 
         const start_idx = all_entries.items.len;
@@ -672,7 +682,9 @@ test "computeCosts today entries only" {
     };
 
     var entries = [_]TranscriptEntry{ old_entry, today_entry };
-    const day_start_ms = time.getLocalDayStartMs(std.testing.allocator, now_ms);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const day_start_ms = time.getLocalDayStartMs(std.testing.io, &env, std.testing.allocator, now_ms);
     const result = computeCosts(&entries, now_ms, day_start_ms, null);
     const p = pricing.findPricing("claude-sonnet-4-5-20250929").?;
     const expected_today = pricing.calculateEntryCost(p, today_entry.usage);
@@ -684,7 +696,9 @@ test "computeCosts old entries excluded from today" {
     var entries = [_]TranscriptEntry{
         .{ .timestamp_ms = now_ms - 48 * 3600 * 1000, .model = "claude-sonnet-4-5-20250929", .usage = .{ .input_tokens = 5000, .output_tokens = 2000 } },
     };
-    const day_start_ms = time.getLocalDayStartMs(std.testing.allocator, now_ms);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const day_start_ms = time.getLocalDayStartMs(std.testing.io, &env, std.testing.allocator, now_ms);
     const result = computeCosts(&entries, now_ms, day_start_ms, null);
     try std.testing.expectApproxEqAbs(@as(f64, 0), result.today_cost, 1e-10);
 }
@@ -694,17 +708,17 @@ test "parseJsonlContent global dedup across files" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var global_seen = std.StringHashMapUnmanaged(void){};
+    var global_seen = std.StringHashMapUnmanaged(void).empty;
 
     const line =
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"id":"msg_001","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":1000,"output_tokens":500}},"requestId":"req_001"}
     ;
 
-    var entries1: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var entries1: std.ArrayList(TranscriptEntry) = .empty;
     parseJsonlContent(alloc, alloc, line, &entries1, &global_seen);
     try std.testing.expectEqual(@as(usize, 1), entries1.items.len);
 
-    var entries2: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var entries2: std.ArrayList(TranscriptEntry) = .empty;
     parseJsonlContent(alloc, alloc, line, &entries2, &global_seen);
     try std.testing.expectEqual(@as(usize, 0), entries2.items.len);
 }
@@ -714,7 +728,7 @@ test "parseJsonlContent per-file dedup still works" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var seen = std.StringHashMapUnmanaged(void){};
+    var seen = std.StringHashMapUnmanaged(void).empty;
 
     const content =
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"id":"msg_001","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":1000,"output_tokens":500}},"requestId":"req_001"}
@@ -722,7 +736,7 @@ test "parseJsonlContent per-file dedup still works" {
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"id":"msg_001","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":1000,"output_tokens":500}},"requestId":"req_001"}
     ;
 
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
     parseJsonlContent(alloc, alloc, content, &entries, &seen);
     try std.testing.expectEqual(@as(usize, 1), entries.items.len);
 }
@@ -732,7 +746,7 @@ test "parseJsonlContent no dedup without ids" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var seen = std.StringHashMapUnmanaged(void){};
+    var seen = std.StringHashMapUnmanaged(void).empty;
 
     const content =
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":1000,"output_tokens":500}}}
@@ -740,13 +754,13 @@ test "parseJsonlContent no dedup without ids" {
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":1000,"output_tokens":500}}}
     ;
 
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
     parseJsonlContent(alloc, alloc, content, &entries, &seen);
     try std.testing.expectEqual(@as(usize, 2), entries.items.len);
 }
 
 test "cache roundtrip with block" {
-    const Writer = std.io.Writer;
+    const Writer = std.Io.Writer;
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
@@ -798,7 +812,7 @@ test "cache roundtrip with block" {
 }
 
 test "cache roundtrip without block" {
-    const Writer = std.io.Writer;
+    const Writer = std.Io.Writer;
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
@@ -818,7 +832,7 @@ test "cache roundtrip without block" {
 }
 
 test "cache day boundary invalidation" {
-    const Writer = std.io.Writer;
+    const Writer = std.Io.Writer;
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
@@ -898,7 +912,9 @@ test "computeCosts with resets_at_ms uses window" {
     };
 
     var entries = [_]TranscriptEntry{ outside_window, in_window };
-    const day_start_ms = time.getLocalDayStartMs(std.testing.allocator, now_ms);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const day_start_ms = time.getLocalDayStartMs(std.testing.io, &env, std.testing.allocator, now_ms);
     const result = computeCosts(&entries, now_ms, day_start_ms, resets_at_ms);
 
     try std.testing.expect(result.block != null);
@@ -934,8 +950,8 @@ test "parseJsonlContent skips invalid json with input_tokens" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var seen = std.StringHashMapUnmanaged(void){};
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var seen = std.StringHashMapUnmanaged(void).empty;
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
 
     // Contains "input_tokens" but is not valid JSON
     parseJsonlContent(alloc, alloc, "{broken input_tokens}", &entries, &seen);
@@ -946,8 +962,8 @@ test "parseJsonlContent skips entry without timestamp" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var seen = std.StringHashMapUnmanaged(void){};
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var seen = std.StringHashMapUnmanaged(void).empty;
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
 
     const line =
         \\{"message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":100,"output_tokens":50}}}
@@ -960,8 +976,8 @@ test "parseJsonlContent skips entry without usage" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var seen = std.StringHashMapUnmanaged(void){};
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var seen = std.StringHashMapUnmanaged(void).empty;
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
 
     // Has timestamp and message but no usage (and "input_tokens" in another field to pass the prefix filter)
     const line =
@@ -975,8 +991,8 @@ test "parseJsonlContent model fallback to unknown" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var seen = std.StringHashMapUnmanaged(void){};
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var seen = std.StringHashMapUnmanaged(void).empty;
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
 
     // No model field in message
     const line =
@@ -990,17 +1006,18 @@ test "parseJsonlContent model fallback to unknown" {
 // --- diffScan ---
 
 fn createTmpFile(path: []const u8, content: []const u8) !void {
-    var f = try fs.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(content);
+    g_io = std.testing.io;
+    var f = try Io.Dir.createFileAbsolute(std.testing.io, path, .{});
+    defer f.close(std.testing.io);
+    try f.writeStreamingAll(std.testing.io, content);
 }
 
 fn removeTmpFile(path: []const u8) void {
-    fs.deleteFileAbsolute(path) catch {};
+    Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
 }
 
 fn statFileSize(path: []const u8) i64 {
-    const stat = fs.cwd().statFile(path) catch return 0;
+    const stat = Io.Dir.cwd().statFile(std.testing.io, path, .{}) catch return 0;
     return @intCast(stat.size);
 }
 
@@ -1188,8 +1205,8 @@ test "parseJsonlContent parses speed fast" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var seen = std.StringHashMapUnmanaged(void){};
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var seen = std.StringHashMapUnmanaged(void).empty;
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
 
     const line =
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50,"speed":"fast"}}}
@@ -1203,8 +1220,8 @@ test "parseJsonlContent speed non-fast is false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var seen = std.StringHashMapUnmanaged(void){};
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var seen = std.StringHashMapUnmanaged(void).empty;
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
 
     const line =
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50,"speed":"standard"}}}
@@ -1218,8 +1235,8 @@ test "parseJsonlContent no speed field is false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var seen = std.StringHashMapUnmanaged(void){};
-    var entries: std.ArrayListUnmanaged(TranscriptEntry) = .{};
+    var seen = std.StringHashMapUnmanaged(void).empty;
+    var entries: std.ArrayList(TranscriptEntry) = .empty;
 
     const line =
         \\{"timestamp":"2025-06-15T10:00:00Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50}}}
@@ -1350,7 +1367,9 @@ test "computeBlockFromWindow now_ms before window clamps elapsed" {
 
 test "computeCosts entry exactly at today_start_ms" {
     const now_ms: i64 = (time.daysFromCivil(2025, 6, 15) * 86400 + 12 * 3600) * 1000;
-    const today_start = time.getLocalDayStartMs(std.testing.allocator, now_ms);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const today_start = time.getLocalDayStartMs(std.testing.io, &env, std.testing.allocator, now_ms);
     var entries = [_]TranscriptEntry{
         .{ .timestamp_ms = today_start, .model = "claude-sonnet-4-5-20250929", .usage = .{ .input_tokens = 1000, .output_tokens = 500 } },
     };
@@ -1360,7 +1379,9 @@ test "computeCosts entry exactly at today_start_ms" {
 
 test "computeCosts unknown model contributes zero cost" {
     const now_ms: i64 = (time.daysFromCivil(2025, 6, 15) * 86400 + 12 * 3600) * 1000;
-    const day_start_ms = time.getLocalDayStartMs(std.testing.allocator, now_ms);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const day_start_ms = time.getLocalDayStartMs(std.testing.io, &env, std.testing.allocator, now_ms);
     var entries = [_]TranscriptEntry{
         .{ .timestamp_ms = now_ms - 1000, .model = "unknown-xyz", .usage = .{ .input_tokens = 1000, .output_tokens = 500 } },
     };
@@ -1370,7 +1391,9 @@ test "computeCosts unknown model contributes zero cost" {
 
 test "computeCosts resets_at_ms with no entries in window" {
     const now_ms: i64 = (time.daysFromCivil(2025, 6, 15) * 86400 + 12 * 3600) * 1000;
-    const day_start_ms = time.getLocalDayStartMs(std.testing.allocator, now_ms);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const day_start_ms = time.getLocalDayStartMs(std.testing.io, &env, std.testing.allocator, now_ms);
     const resets_at_ms: i64 = now_ms + 3 * 3600 * 1000;
     // Entry is far before the window
     var entries = [_]TranscriptEntry{
@@ -1383,7 +1406,7 @@ test "computeCosts resets_at_ms with no entries in window" {
 // --- parseCacheBytes corruption ---
 
 test "cache partial file entries truncated" {
-    const Writer = std.io.Writer;
+    const Writer = std.Io.Writer;
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
@@ -1408,7 +1431,7 @@ test "cache partial file entries truncated" {
 }
 
 test "cache path length zero roundtrip" {
-    const Writer = std.io.Writer;
+    const Writer = std.Io.Writer;
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 

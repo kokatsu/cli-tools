@@ -9,7 +9,7 @@ pub fn filter(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 
 fn shouldKeep(line: []const u8) bool {
     if (isFailHeader(line)) return true;
-    const trimmed = std.mem.trimLeft(u8, line, " ");
+    const trimmed = std.mem.trimStart(u8, line, " ");
     if (std.mem.startsWith(u8, trimmed, BULLET)) return true;
     if (std.mem.startsWith(u8, trimmed, "Expected:")) return true;
     if (std.mem.startsWith(u8, trimmed, "Received:")) return true;
@@ -20,7 +20,7 @@ fn shouldKeep(line: []const u8) bool {
 }
 
 fn isFailHeader(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " ");
+    const trimmed = std.mem.trimStart(u8, line, " ");
     return std.mem.startsWith(u8, trimmed, "FAIL ");
 }
 

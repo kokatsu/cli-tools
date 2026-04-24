@@ -52,9 +52,9 @@ pub fn computeLocalDayStartMs(now_ms: i64, utc_offset_s: i32) i64 {
 }
 
 /// Get the start of today in milliseconds (local timezone, pure Zig)
-pub fn getLocalDayStartMs(allocator: std.mem.Allocator, now_ms: i64) i64 {
+pub fn getLocalDayStartMs(io: std.Io, env: *const std.process.Environ.Map, allocator: std.mem.Allocator, now_ms: i64) i64 {
     const now_s = @divFloor(now_ms, @as(i64, 1000));
-    const offset_s = zig_time.getUtcOffsetSeconds(allocator, now_s);
+    const offset_s = zig_time.getUtcOffsetSeconds(io, env, allocator, now_s);
     return computeLocalDayStartMs(now_ms, offset_s);
 }
 
@@ -99,8 +99,10 @@ test "floorToHourMs" {
 }
 
 test "getLocalDayStartMs returns valid day boundary" {
-    const now_ms = std.time.milliTimestamp();
-    const day_start = getLocalDayStartMs(std.testing.allocator, now_ms);
+    const now_ms: i64 = std.Io.Clock.real.now(std.testing.io).toMilliseconds();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const day_start = getLocalDayStartMs(std.testing.io, &env, std.testing.allocator, now_ms);
     try std.testing.expect(day_start <= now_ms);
     try std.testing.expect(now_ms - day_start < 86400 * 1000);
     const diff_ms = day_start - @divFloor(day_start, @as(i64, 1000)) * 1000;

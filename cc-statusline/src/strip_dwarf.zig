@@ -1,6 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
-const fs = std.fs;
+const Io = std.Io;
 
 /// Strip DW_LNCT_LLVM_source from DWARF v5 .debug_line sections.
 ///
@@ -19,16 +19,14 @@ const debug_line_name = ".debug_line";
 const DW_LNCT_LLVM_SOURCE: [3]u8 = .{ 0x81, 0x40, 0x1f };
 const DW_LNCT_TIMESTAMP: [3]u8 = .{ 0x83, 0x00, 0x1f };
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
+    const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 3) {
-        const stderr = fs.File{ .handle = std.posix.STDERR_FILENO };
         var buf: [256]u8 = undefined;
-        var w = stderr.writer(&buf);
+        var w = Io.File.stderr().writerStreaming(io, &buf);
         try w.interface.writeAll("Usage: strip-dwarf <input-elf> <output-elf>\n");
         try w.interface.flush();
         std.process.exit(1);
@@ -37,12 +35,17 @@ pub fn main() !void {
     const input_path = args[1];
     const output_path = args[2];
 
-    const stdout = fs.File{ .handle = std.posix.STDOUT_FILENO };
     var out_buf: [4096]u8 = undefined;
-    var w = stdout.writer(&out_buf);
+    var w = Io.File.stdout().writerStreaming(io, &out_buf);
 
     // Read input ELF
-    const data = try fs.cwd().readFileAlloc(allocator, input_path, 256 * 1024 * 1024);
+    const data = blk: {
+        var f = try Io.Dir.cwd().openFile(io, input_path, .{ .mode = .read_only });
+        defer f.close(io);
+        var rbuf: [8192]u8 = undefined;
+        var reader = f.readerStreaming(io, &rbuf);
+        break :blk try reader.interface.allocRemaining(allocator, .limited(256 * 1024 * 1024));
+    };
 
     // Validate ELF
     if (data.len < 64 or !mem.eql(u8, data[0..4], elf_magic)) {
@@ -82,9 +85,9 @@ pub fn main() !void {
     }
 
     // Write output
-    const out_file = try fs.cwd().createFile(output_path, .{});
-    defer out_file.close();
-    try out_file.writeAll(data);
+    const out_file = try Io.Dir.cwd().createFile(io, output_path, .{});
+    defer out_file.close(io);
+    try out_file.writeStreamingAll(io, data);
 
     try w.interface.print("Written to {s}\n", .{output_path});
     try w.interface.flush();

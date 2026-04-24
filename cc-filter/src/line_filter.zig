@@ -5,7 +5,7 @@ pub fn filterLines(
     input: []const u8,
     comptime keep: fn ([]const u8) bool,
 ) ![]u8 {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     errdefer buf.deinit(allocator);
 
     var iter = std.mem.splitScalar(u8, input, '\n');

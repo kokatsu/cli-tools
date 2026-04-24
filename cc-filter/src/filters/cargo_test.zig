@@ -10,7 +10,7 @@ fn shouldKeep(line: []const u8) bool {
     if (std.mem.startsWith(u8, line, "thread '") and std.mem.indexOf(u8, line, " panicked at ") != null) return true;
     if (std.mem.startsWith(u8, line, "assertion ")) return true;
     if (std.mem.startsWith(u8, line, "test result:")) return true;
-    const trimmed = std.mem.trimLeft(u8, line, " ");
+    const trimmed = std.mem.trimStart(u8, line, " ");
     if (std.mem.startsWith(u8, trimmed, "left: ") or std.mem.startsWith(u8, trimmed, "right: ")) return true;
     if (std.mem.startsWith(u8, line, "error[")) return true;
     return false;

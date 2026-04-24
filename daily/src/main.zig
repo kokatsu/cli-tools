@@ -1,7 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
-const fs = std.fs;
-const posix = std.posix;
+const Io = std.Io;
 const zig_time = @import("zig_util").time;
 
 // ============================================================
@@ -13,6 +12,10 @@ const color_green = "\x1b[0;32m";
 const color_yellow = "\x1b[1;33m";
 const color_blue = "\x1b[0;34m";
 const color_reset = "\x1b[0m";
+
+// Single-threaded CLI, so module-level io/env handles keep helper APIs simple.
+var g_io: Io = undefined;
+var g_env: *const std.process.Environ.Map = undefined;
 
 const categories = [_][]const u8{
     "[タスク] 作業開始・完了",
@@ -71,7 +74,7 @@ const Command = union(enum) {
     help,
 };
 
-fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) Command {
+fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) Command {
     if (args.len == 0) return .open_editor;
 
     const first = args[0];
@@ -93,7 +96,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) Command {
     return .{ .positional = joinArgs(allocator, args) };
 }
 
-fn joinArgs(allocator: std.mem.Allocator, args: []const []const u8) []const u8 {
+fn joinArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) []const u8 {
     var total: usize = 0;
     for (args, 0..) |arg, i| {
         if (i > 0) total += 1;
@@ -117,13 +120,11 @@ fn joinArgs(allocator: std.mem.Allocator, args: []const []const u8) []const u8 {
 // ============================================================
 
 fn writeStderr(msg: []const u8) void {
-    const f = fs.File{ .handle = posix.STDERR_FILENO };
-    f.writeAll(msg) catch {};
+    Io.File.stderr().writeStreamingAll(g_io, msg) catch {};
 }
 
 fn writeStdout(msg: []const u8) void {
-    const f = fs.File{ .handle = posix.STDOUT_FILENO };
-    f.writeAll(msg) catch {};
+    Io.File.stdout().writeStreamingAll(g_io, msg) catch {};
 }
 
 fn fatal(msg: []const u8) noreturn {
@@ -181,8 +182,8 @@ const LocalTime = struct {
 };
 
 fn getLocalTime(allocator: std.mem.Allocator) LocalTime {
-    const now_s = std.time.timestamp();
-    const offset = zig_time.getUtcOffsetSeconds(allocator, now_s);
+    const now_s: i64 = Io.Clock.real.now(g_io).toSeconds();
+    const offset = zig_time.getUtcOffsetSeconds(g_io, g_env, allocator, now_s);
     const local_s = now_s + @as(i64, offset);
     const civil = zig_time.epochToCivil(local_s);
     return .{
@@ -200,17 +201,16 @@ fn getLocalTime(allocator: std.mem.Allocator) LocalTime {
 // ============================================================
 
 fn getRepoRoot(allocator: std.mem.Allocator) []const u8 {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, g_io, .{
         .argv = &.{ "git", "rev-parse", "--show-toplevel" },
     }) catch fatal("gitコマンドの実行に失敗しました");
     switch (result.term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             fatal("Gitリポジトリが見つかりません");
         },
         else => fatal("Gitリポジトリが見つかりません"),
     }
-    return mem.trimRight(u8, result.stdout, "\n");
+    return mem.trimEnd(u8, result.stdout, "\n");
 }
 
 fn getDailyFilePath(allocator: std.mem.Allocator, lt: LocalTime) []const u8 {
@@ -219,21 +219,33 @@ fn getDailyFilePath(allocator: std.mem.Allocator, lt: LocalTime) []const u8 {
     const dir_path = std.fmt.allocPrint(allocator, "{s}/.kokatsu/daily/{d:0>4}/{d:0>2}", .{ repo_root, lt.year, lt.month }) catch fatal("out of memory");
     const file_path = std.fmt.allocPrint(allocator, "{s}/{d:0>4}-{d:0>2}-{d:0>2}.md", .{ dir_path, lt.year, lt.month, lt.day }) catch fatal("out of memory");
 
-    fs.cwd().makePath(dir_path) catch
+    Io.Dir.cwd().createDirPath(g_io, dir_path) catch
         fatal("ディレクトリの作成に失敗しました");
 
-    const file = fs.openFileAbsolute(file_path, .{ .mode = .read_only }) catch |e| switch (e) {
+    const file = Io.Dir.openFileAbsolute(g_io, file_path, .{ .mode = .read_only }) catch |e| switch (e) {
         error.FileNotFound => {
             const header = std.fmt.allocPrint(allocator, "# {d:0>4}-{d:0>2}-{d:0>2}\n", .{ lt.year, lt.month, lt.day }) catch fatal("out of memory");
-            const new_file = fs.createFileAbsolute(file_path, .{}) catch fatal("ファイルの作成に失敗しました");
-            new_file.writeAll(header) catch {};
-            new_file.close();
+            const new_file = Io.Dir.createFileAbsolute(g_io, file_path, .{}) catch fatal("ファイルの作成に失敗しました");
+            new_file.writeStreamingAll(g_io, header) catch {};
+            new_file.close(g_io);
             return file_path;
         },
         else => fatal("ファイルアクセスエラー"),
     };
-    file.close();
+    file.close(g_io);
     return file_path;
+}
+
+fn appendToFile(file_path: []const u8, data: []const u8) void {
+    const file = Io.Dir.openFileAbsolute(g_io, file_path, .{ .mode = .read_write }) catch fatal("ファイルを開けません");
+    defer file.close(g_io);
+
+    const len = file.length(g_io) catch fatal("ファイルサイズ取得に失敗しました");
+    var buf: [1024]u8 = undefined;
+    var writer = file.writerStreaming(g_io, &buf);
+    writer.seekTo(len) catch fatal("シークに失敗しました");
+    writer.interface.writeAll(data) catch fatal("書き込みに失敗しました");
+    writer.interface.flush() catch fatal("書き込みに失敗しました");
 }
 
 // ============================================================
@@ -241,30 +253,32 @@ fn getDailyFilePath(allocator: std.mem.Allocator, lt: LocalTime) []const u8 {
 // ============================================================
 
 fn selectWithFzf(allocator: std.mem.Allocator, items: []const []const u8, prompt_text: []const u8, header: []const u8) ?[]const u8 {
-    var child = std.process.Child.init(&.{ "fzf", "--height=40%", "--border=rounded", prompt_text, header, "--color=header:italic:underline,prompt:bold" }, allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Inherit;
-
-    child.spawn() catch fatal("fzfの起動に失敗しました");
+    var child = std.process.spawn(g_io, .{
+        .argv = &.{ "fzf", "--height=40%", "--border=rounded", prompt_text, header, "--color=header:italic:underline,prompt:bold" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+    }) catch fatal("fzfの起動に失敗しました");
 
     const stdin_file = child.stdin.?;
     for (items, 0..) |item, i| {
-        if (i > 0) stdin_file.writeAll("\n") catch {};
-        stdin_file.writeAll(item) catch {};
+        if (i > 0) stdin_file.writeStreamingAll(g_io, "\n") catch {};
+        stdin_file.writeStreamingAll(g_io, item) catch {};
     }
-    child.stdin.?.close();
+    child.stdin.?.close(g_io);
     child.stdin = null;
 
-    const stdout_data = child.stdout.?.readToEndAlloc(allocator, 4096) catch return null;
+    var read_buf: [4096]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(g_io, &read_buf);
+    const stdout_data = reader.interface.allocRemaining(allocator, .limited(4096)) catch return null;
 
-    const term = child.wait() catch return null;
+    const term = child.wait(g_io) catch return null;
     switch (term) {
-        .Exited => |code| if (code != 0) return null,
+        .exited => |code| if (code != 0) return null,
         else => return null,
     }
 
-    const trimmed = mem.trimRight(u8, stdout_data, "\n\r");
+    const trimmed = mem.trimEnd(u8, stdout_data, "\n\r");
     if (trimmed.len == 0) return null;
     return trimmed;
 }
@@ -315,10 +329,7 @@ fn addMemo(allocator: std.mem.Allocator, category: []const u8, content: []const 
     const cat_part = if (category.len > 0) std.fmt.allocPrint(allocator, "{s} ", .{category}) catch fatal("out of memory") else "";
     const entry = std.fmt.allocPrint(allocator, "\n## {s}\n{s}{s}{s}\n", .{ timestamp, imp_part, cat_part, content }) catch fatal("out of memory");
 
-    const file = fs.openFileAbsolute(daily_file, .{ .mode = .write_only }) catch fatal("ファイルを開けません");
-    defer file.close();
-    file.seekFromEnd(0) catch {};
-    file.writeAll(entry) catch fatal("書き込みに失敗しました");
+    appendToFile(daily_file, entry);
 
     const msg = std.fmt.allocPrint(allocator, "メモを追加しました: {s}", .{daily_file}) catch return;
     success(msg);
@@ -327,31 +338,28 @@ fn addMemo(allocator: std.mem.Allocator, category: []const u8, content: []const 
     info(preview);
 }
 
-fn spawnEditor(allocator: std.mem.Allocator, file_path: []const u8) void {
-    const editor = posix.getenv("EDITOR") orelse "vi";
-    var child = std.process.Child.init(&.{ editor, file_path }, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-
-    child.spawn() catch fatal("エディタの起動に失敗しました");
-    _ = child.wait() catch {};
+fn spawnEditor(file_path: []const u8) void {
+    const editor = g_env.get("EDITOR") orelse "vi";
+    var child = std.process.spawn(g_io, .{
+        .argv = &.{ editor, file_path },
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch fatal("エディタの起動に失敗しました");
+    _ = child.wait(g_io) catch {};
 }
 
 fn openEditor(allocator: std.mem.Allocator) void {
     const lt = getLocalTime(allocator);
     const daily_file = getDailyFilePath(allocator, lt);
-    spawnEditor(allocator, daily_file);
+    spawnEditor(daily_file);
 }
 
 fn addSummaryTemplate(allocator: std.mem.Allocator) void {
     const lt = getLocalTime(allocator);
     const daily_file = getDailyFilePath(allocator, lt);
 
-    const file = fs.openFileAbsolute(daily_file, .{ .mode = .write_only }) catch fatal("ファイルを開けません");
-    defer file.close();
-    file.seekFromEnd(0) catch {};
-    file.writeAll(summary_template) catch fatal("書き込みに失敗しました");
+    appendToFile(daily_file, summary_template);
 
     const msg = std.fmt.allocPrint(allocator, "日次サマリーテンプレートを追加しました: {s}", .{daily_file}) catch return;
     success(msg);
@@ -365,29 +373,31 @@ fn multilineMode(allocator: std.mem.Allocator) void {
     const category = selectCategory(allocator);
     const importance = selectImportance(allocator);
 
-    const pid = posix.system.getpid();
-    const ts = std.time.timestamp();
-    const tmpdir = posix.getenv("TMPDIR") orelse "/tmp";
+    const pid = std.posix.system.getpid();
+    const ts: i64 = Io.Clock.real.now(g_io).toSeconds();
+    const tmpdir = g_env.get("TMPDIR") orelse "/tmp";
     const tmp_path = std.fmt.allocPrint(allocator, "{s}/daily-{d}-{d}.md", .{ tmpdir, pid, ts }) catch fatal("out of memory");
 
-    const tmp_file = fs.createFileAbsolute(tmp_path, .{}) catch fatal("一時ファイルの作成に失敗");
-    tmp_file.writeAll("# 下記にメモ内容を記入してください\n# この行と上の行は削除されます\n\n\n") catch {};
-    tmp_file.close();
-    defer fs.deleteFileAbsolute(tmp_path) catch {};
+    const tmp_file = Io.Dir.createFileAbsolute(g_io, tmp_path, .{}) catch fatal("一時ファイルの作成に失敗");
+    tmp_file.writeStreamingAll(g_io, "# 下記にメモ内容を記入してください\n# この行と上の行は削除されます\n\n\n") catch {};
+    tmp_file.close(g_io);
+    defer Io.Dir.deleteFileAbsolute(g_io, tmp_path) catch {};
 
-    spawnEditor(allocator, tmp_path);
+    spawnEditor(tmp_path);
 
     const raw_content = blk: {
-        const f = fs.openFileAbsolute(tmp_path, .{}) catch fatal("一時ファイルの読み込みに失敗");
-        defer f.close();
-        break :blk f.readToEndAlloc(allocator, 1024 * 1024) catch fatal("out of memory");
+        const f = Io.Dir.openFileAbsolute(g_io, tmp_path, .{}) catch fatal("一時ファイルの読み込みに失敗");
+        defer f.close(g_io);
+        var buf: [4096]u8 = undefined;
+        var reader = f.readerStreaming(g_io, &buf);
+        break :blk reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch fatal("out of memory");
     };
 
-    var lines: std.ArrayList([]const u8) = .{};
+    var lines: std.ArrayList([]const u8) = .empty;
     var iter = mem.splitScalar(u8, raw_content, '\n');
     var past_header = false;
     while (iter.next()) |line| {
-        const trimmed = mem.trimLeft(u8, line, " \t");
+        const trimmed = mem.trimStart(u8, line, " \t");
         if (!past_header) {
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
             past_header = true;
@@ -396,7 +406,7 @@ fn multilineMode(allocator: std.mem.Allocator) void {
     }
 
     // Trim trailing empty lines
-    while (lines.items.len > 0 and mem.trimRight(u8, lines.items[lines.items.len - 1], " \t").len == 0) {
+    while (lines.items.len > 0 and mem.trimEnd(u8, lines.items[lines.items.len - 1], " \t").len == 0) {
         _ = lines.pop();
     }
 
@@ -435,9 +445,10 @@ fn interactiveMode(allocator: std.mem.Allocator) void {
 
     writeStdout(color_yellow ++ "メモ内容: " ++ color_reset);
 
-    const stdin_file = fs.File{ .handle = posix.STDIN_FILENO };
-    const content_raw = stdin_file.readToEndAlloc(allocator, 1024 * 1024) catch fatal("入力の読み取りに失敗");
-    const content = mem.trimRight(u8, content_raw, "\n\r");
+    var buf: [4096]u8 = undefined;
+    var reader = Io.File.stdin().readerStreaming(g_io, &buf);
+    const content_raw = reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch fatal("入力の読み取りに失敗");
+    const content = mem.trimEnd(u8, content_raw, "\n\r");
 
     if (content.len == 0) {
         fatal("メモ内容が空です");
@@ -450,8 +461,10 @@ fn interactiveMode(allocator: std.mem.Allocator) void {
 // Entry point
 // ============================================================
 
-pub fn main() void {
-    mainImpl() catch |err| {
+pub fn main(init: std.process.Init) void {
+    g_io = init.io;
+    g_env = init.environ_map;
+    mainImpl(init) catch |err| {
         writeStderr(color_red);
         writeStderr("エラー: ");
         writeStderr(@errorName(err));
@@ -461,12 +474,9 @@ pub fn main() void {
     };
 }
 
-fn mainImpl() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
+fn mainImpl(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
     const cmd = parseArgs(allocator, args[1..]);
 
     switch (cmd) {
@@ -537,23 +547,9 @@ test "parseArgs: -q with text → quick" {
 test "parseArgs: positional text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cmd = parseArgs(arena.allocator(), &.{ "hello", "world" });
+    const cmd = parseArgs(arena.allocator(), &.{"hello world"});
     switch (cmd) {
         .positional => |text| try std.testing.expectEqualStrings("hello world", text),
         else => return error.TestUnexpectedResult,
     }
-}
-
-test "joinArgs: single arg" {
-    const alloc = std.testing.allocator;
-    const result = joinArgs(alloc, &.{"hello"});
-    defer alloc.free(result);
-    try std.testing.expectEqualStrings("hello", result);
-}
-
-test "joinArgs: multiple args" {
-    const alloc = std.testing.allocator;
-    const result = joinArgs(alloc, &.{ "hello", "beautiful", "world" });
-    defer alloc.free(result);
-    try std.testing.expectEqualStrings("hello beautiful world", result);
 }

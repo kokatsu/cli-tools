@@ -6,17 +6,16 @@ const jest = @import("filters/jest.zig");
 
 const MAX_INPUT: usize = 16 * 1024 * 1024;
 
-pub fn run(allocator: std.mem.Allocator, kind: []const u8) !void {
-    var stdin_file = std.fs.File.stdin();
+pub fn run(allocator: std.mem.Allocator, io: std.Io, kind: []const u8) !void {
     var buf: [8192]u8 = undefined;
-    var reader = stdin_file.reader(&buf);
-    var data = std.ArrayList(u8){};
+    var stdin_reader = std.Io.File.stdin().readerStreaming(io, &buf);
+    var data = std.ArrayList(u8).empty;
     defer data.deinit(allocator);
-    reader.interface.appendRemaining(allocator, &data, .limited(MAX_INPUT)) catch {};
+    stdin_reader.interface.appendRemaining(allocator, &data, .limited(MAX_INPUT)) catch {};
 
     const out = try filter(allocator, kind, data.items);
     defer allocator.free(out);
-    try std.fs.File.stdout().writeAll(out);
+    try std.Io.File.stdout().writeStreamingAll(io, out);
 }
 
 pub fn filter(allocator: std.mem.Allocator, kind: []const u8, input: []const u8) ![]u8 {
@@ -30,7 +29,7 @@ pub fn filter(allocator: std.mem.Allocator, kind: []const u8, input: []const u8)
 }
 
 pub fn stripAnsi(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     errdefer buf.deinit(allocator);
     var i: usize = 0;
     while (i < input.len) {
