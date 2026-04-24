@@ -20,7 +20,7 @@
         inherit pname;
         version = "0.1.0";
         src = ./.;
-        nativeBuildInputs = [pkgs.zig];
+        nativeBuildInputs = [pkgs.zig_0_15];
         dontConfigure = true;
         dontFixup = true;
         buildPhase = ''
@@ -65,7 +65,7 @@
 
     devShells = forAllSystems (system: {
       default = (pkgsFor system).mkShell {
-        packages = [(pkgsFor system).zig];
+        packages = [(pkgsFor system).zig_0_15];
       };
     });
 
