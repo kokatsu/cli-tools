@@ -7,6 +7,7 @@ const scan = @import("scan.zig");
 const time = @import("time.zig");
 const types = @import("types.zig");
 const ju = @import("zig_util").json;
+const zig_time = @import("zig_util").time;
 
 const StdinInfo = types.StdinInfo;
 const RateLimitWindow = types.RateLimitWindow;
@@ -168,9 +169,11 @@ fn mainImpl(init: std.process.Init) !void {
     var branch_buf: [256]u8 = undefined;
     const git_branch: ?[]const u8 = if (stdin_info.cwd) |cwd| getGitBranch(io, &branch_buf, cwd) else null;
 
+    const utc_offset_s = zig_time.getUtcOffsetSeconds(io, init.environ_map, allocator, @divFloor(now_ms, @as(i64, 1000)));
+
     var buf: [4096]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(io, &buf);
-    try output.printOutput(&writer.interface, theme, stdin_info, scan_result, now_ms, git_branch);
+    try output.printOutput(&writer.interface, theme, stdin_info, scan_result, now_ms, utc_offset_s, git_branch);
     try writer.interface.flush();
 }
 

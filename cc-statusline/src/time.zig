@@ -2,6 +2,13 @@ const std = @import("std");
 const zig_time = @import("zig_util").time;
 
 pub const daysFromCivil = zig_time.daysFromCivil;
+pub const epochToCivil = zig_time.epochToCivil;
+
+pub fn formatLocalDateTime(buf: []u8, epoch_ms: i64, utc_offset_s: i32) []const u8 {
+    const local_s = @divFloor(epoch_ms, @as(i64, 1000)) + @as(i64, utc_offset_s);
+    const c = zig_time.epochToCivil(local_s);
+    return std.fmt.bufPrint(buf, "{d:0>2}/{d:0>2} {d:0>2}:{d:0>2}", .{ c.month, c.day, c.hour, c.minute }) catch "??";
+}
 
 // ============================================================
 // ISO 8601 Parser
@@ -180,4 +187,32 @@ test "floorToHourMs exactly on hour boundary" {
 
 test "floorToHourMs negative exactly on hour" {
     try std.testing.expectEqual(@as(i64, -3600000), floorToHourMs(-3600000));
+}
+
+// --- formatLocalDateTime ---
+
+test "formatLocalDateTime UTC" {
+    var buf: [16]u8 = undefined;
+    const epoch_ms: i64 = (daysFromCivil(2026, 3, 20) * 86400 + 15 * 3600 + 7 * 60) * 1000;
+    try std.testing.expectEqualStrings("03/20 15:07", formatLocalDateTime(&buf, epoch_ms, 0));
+}
+
+test "formatLocalDateTime JST +9h shifts forward" {
+    var buf: [16]u8 = undefined;
+    // 2026-03-20 15:00:00 UTC + 9h = 2026-03-21 00:00 JST
+    const epoch_ms: i64 = (daysFromCivil(2026, 3, 20) * 86400 + 15 * 3600) * 1000;
+    try std.testing.expectEqualStrings("03/21 00:00", formatLocalDateTime(&buf, epoch_ms, 32400));
+}
+
+test "formatLocalDateTime EST -5h shifts back" {
+    var buf: [16]u8 = undefined;
+    // 2026-03-20 02:30 UTC - 5h = 2026-03-19 21:30 EST
+    const epoch_ms: i64 = (daysFromCivil(2026, 3, 20) * 86400 + 2 * 3600 + 30 * 60) * 1000;
+    try std.testing.expectEqualStrings("03/19 21:30", formatLocalDateTime(&buf, epoch_ms, -18000));
+}
+
+test "formatLocalDateTime drops sub-second precision" {
+    var buf: [16]u8 = undefined;
+    const epoch_ms: i64 = (daysFromCivil(2026, 3, 20) * 86400 + 15 * 3600) * 1000 + 999;
+    try std.testing.expectEqualStrings("03/20 15:00", formatLocalDateTime(&buf, epoch_ms, 0));
 }

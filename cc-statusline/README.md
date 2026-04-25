@@ -32,7 +32,7 @@ cc-statusline reads Claude Code's statusline JSON from stdin and outputs ANSI-co
 ```text
 🤖 Opus 4.6 | 🌿 main | 🧠 ██████▓░░░ 63%
 💰 $0.20 today | 📊 $0.20 block 🔥 $0.60 /h
-🕔 5h ████▓░░░░░ 42% 2h 30m | 📅 7d ████████▓░ 86% 3d 12h
+🕔 5h ████▓░░░░░ 42% 2h 30m 03/20 23:00 | 📅 7d ████████▓░ 86% 3d 12h 03/24 09:00
 ```
 
 ### Claude Code Integration

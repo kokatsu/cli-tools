@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const Writer = std.Io.Writer;
 const types = @import("types.zig");
+const time = @import("time.zig");
 
 const RateLimitWindow = types.RateLimitWindow;
 const BlockInfo = types.BlockInfo;
@@ -233,7 +234,7 @@ pub fn parseBranchMax(val: ?[]const u8) usize {
 // Output
 // ============================================================
 
-fn writeRateLimitWindow(w: *Writer, theme: Theme, label: []const u8, rl: RateLimitWindow, now_ms: i64) !void {
+fn writeRateLimitWindow(w: *Writer, theme: Theme, label: []const u8, rl: RateLimitWindow, now_ms: i64, utc_offset_s: i32) !void {
     const usage_color = rateLimitUsageColor(theme, rl.used_percentage);
     var bar_buf: [progress_bar_buf_size]u8 = undefined;
     const bar = buildProgressBar(&bar_buf, rl.used_percentage, bar_width, theme.bar_filled, theme.bar_transition, theme.bar_empty);
@@ -249,10 +250,12 @@ fn writeRateLimitWindow(w: *Writer, theme: Theme, label: []const u8, rl: RateLim
         const time_color = rateLimitTimeColor(theme, remaining);
         var reset_buf: [64]u8 = undefined;
         try w.print(" {s}{s}{s}", .{ time_color, formatResetDuration(&reset_buf, remaining), theme.reset });
+        var dt_buf: [16]u8 = undefined;
+        try w.print(" {s}{s}{s}", .{ theme.dim, time.formatLocalDateTime(&dt_buf, reset_ms, utc_offset_s), theme.reset });
     }
 }
 
-pub fn printOutput(w: *Writer, theme: Theme, stdin_info: StdinInfo, scan: ?ScanResult, now_ms: i64, git_branch: ?[]const u8) !void {
+pub fn printOutput(w: *Writer, theme: Theme, stdin_info: StdinInfo, scan: ?ScanResult, now_ms: i64, utc_offset_s: i32, git_branch: ?[]const u8) !void {
     // === Line 1: Model + Branch + Context ===
     const model_name = stdin_info.model_name orelse "Unknown";
     try w.print("\xf0\x9f\xa4\x96 {s}{s}{s}", .{ theme.model, model_name, theme.reset });
@@ -305,7 +308,7 @@ pub fn printOutput(w: *Writer, theme: Theme, stdin_info: StdinInfo, scan: ?ScanR
         try w.print("\xf0\x9f\x95\x94 ", .{}); // 🕔
 
         if (stdin_info.rate_limit_5h) |rl5| {
-            try writeRateLimitWindow(w, theme, "5h", rl5, now_ms);
+            try writeRateLimitWindow(w, theme, "5h", rl5, now_ms, utc_offset_s);
         }
 
         if (stdin_info.rate_limit_5h != null and stdin_info.rate_limit_7d != null) {
@@ -314,7 +317,7 @@ pub fn printOutput(w: *Writer, theme: Theme, stdin_info: StdinInfo, scan: ?ScanR
 
         if (stdin_info.rate_limit_7d) |rl7| {
             try w.print("\xf0\x9f\x93\x85 ", .{}); // 📅
-            try writeRateLimitWindow(w, theme, "7d", rl7, now_ms);
+            try writeRateLimitWindow(w, theme, "7d", rl7, now_ms, utc_offset_s);
         }
 
         try w.writeAll("\n");
@@ -502,7 +505,7 @@ test "printOutput line1 model name" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     const info = StdinInfo{ .model_name = "Opus 4.6" };
-    try printOutput(&aw.writer, theme_default, info, null, 0, null);
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
     try std.testing.expect(contains(aw.writer.buffered(), "Opus 4.6"));
 }
 
@@ -510,7 +513,7 @@ test "printOutput line1 model unknown" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     const info = StdinInfo{};
-    try printOutput(&aw.writer, theme_default, info, null, 0, null);
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
     try std.testing.expect(contains(aw.writer.buffered(), "Unknown"));
 }
 
@@ -518,7 +521,7 @@ test "printOutput line1 context percentage with color" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     const info = StdinInfo{ .context_pct = 80.0 };
-    try printOutput(&aw.writer, theme_default, info, null, 0, null);
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "80%"));
     try std.testing.expect(contains(out, theme_default.red));
@@ -528,7 +531,7 @@ test "printOutput line1 context NA" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     const info = StdinInfo{};
-    try printOutput(&aw.writer, theme_default, info, null, 0, null);
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
     try std.testing.expect(contains(aw.writer.buffered(), "N/A"));
 }
 
@@ -536,7 +539,7 @@ test "printOutput line1 git branch" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     const info = StdinInfo{};
-    try printOutput(&aw.writer, theme_default, info, null, 0, "main");
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, "main");
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "main"));
     try std.testing.expect(contains(out, "\xf0\x9f\x8c\xbf")); // 🌿
@@ -548,7 +551,7 @@ test "printOutput line2 today cost" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     const scan = ScanResult{ .today_cost = 1.50 };
-    try printOutput(&aw.writer, theme_default, StdinInfo{}, scan, 0, null);
+    try printOutput(&aw.writer, theme_default, StdinInfo{}, scan, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "$1.50"));
     try std.testing.expect(contains(out, "today"));
@@ -566,7 +569,7 @@ test "printOutput line2 block cost and burn rate" {
             .burn_rate_per_hr = 0.80,
         },
     };
-    try printOutput(&aw.writer, theme_default, StdinInfo{}, scan, 0, null);
+    try printOutput(&aw.writer, theme_default, StdinInfo{}, scan, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "$2.00"));
     try std.testing.expect(contains(out, "block"));
@@ -579,7 +582,7 @@ test "printOutput line2 block cost and burn rate" {
 test "printOutput line2 scan null" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try printOutput(&aw.writer, theme_default, StdinInfo{}, null, 0, null);
+    try printOutput(&aw.writer, theme_default, StdinInfo{}, null, 0, 0, null);
     try std.testing.expect(contains(aw.writer.buffered(), "N/A today"));
 }
 
@@ -591,7 +594,7 @@ test "printOutput line3 5h rate limit" {
     const info = StdinInfo{
         .rate_limit_5h = .{ .used_percentage = 42.0 },
     };
-    try printOutput(&aw.writer, theme_default, info, null, 0, null);
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "\xf0\x9f\x95\x94")); // 🕔
     try std.testing.expect(contains(out, "5h"));
@@ -605,7 +608,7 @@ test "printOutput line3 7d rate limit" {
     const info = StdinInfo{
         .rate_limit_7d = .{ .used_percentage = 86.0 },
     };
-    try printOutput(&aw.writer, theme_default, info, null, 0, null);
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "\xf0\x9f\x93\x85")); // 📅
     try std.testing.expect(contains(out, "7d"));
@@ -621,7 +624,7 @@ test "printOutput line3 75pct uses yellow not red" {
     const info = StdinInfo{
         .rate_limit_5h = .{ .used_percentage = 75.0 },
     };
-    try printOutput(&aw.writer, theme, info, null, 0, null);
+    try printOutput(&aw.writer, theme, info, null, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, theme.yellow ++ "75%"));
     try std.testing.expect(!contains(out, theme.red ++ "75%"));
@@ -634,7 +637,7 @@ test "printOutput line3 both rate limits with separator" {
         .rate_limit_5h = .{ .used_percentage = 30.0 },
         .rate_limit_7d = .{ .used_percentage = 60.0 },
     };
-    try printOutput(&aw.writer, theme_default, info, null, 0, null);
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "5h"));
     try std.testing.expect(contains(out, "7d"));
@@ -652,8 +655,34 @@ test "printOutput line3 rate limit reset time" {
             .resets_at_ms = now_ms + 2 * 3600 * 1000 + 30 * 60 * 1000, // +2h 30m
         },
     };
-    try printOutput(&aw.writer, theme_default, info, null, now_ms, null);
+    try printOutput(&aw.writer, theme_default, info, null, now_ms, 0, null);
     try std.testing.expect(contains(aw.writer.buffered(), "2h 30m"));
+}
+
+test "printOutput line3 absolute reset datetime in dim" {
+    var aw: Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    const theme = theme_catppuccin_mocha;
+    // 2026-03-20 12:00:00 UTC
+    const now_ms: i64 = (time.daysFromCivil(2026, 3, 20) * 86400 + 12 * 3600) * 1000;
+    const reset_ms = now_ms + 3 * 3600 * 1000; // +3h → 15:00 UTC
+    const info = StdinInfo{
+        .rate_limit_5h = .{
+            .used_percentage = 50.0,
+            .resets_at_ms = reset_ms,
+        },
+    };
+    // UTC (offset 0): expect "03/20 15:00"
+    try printOutput(&aw.writer, theme, info, null, now_ms, 0, null);
+    const out_utc = aw.writer.buffered();
+    try std.testing.expect(contains(out_utc, theme.dim ++ "03/20 15:00"));
+
+    // JST (+9h): 15:00 UTC → 24:00 = next day 00:00 → "03/21 00:00"
+    aw.deinit();
+    aw = .init(std.testing.allocator);
+    try printOutput(&aw.writer, theme, info, null, now_ms, 32400, null);
+    const out_jst = aw.writer.buffered();
+    try std.testing.expect(contains(out_jst, theme.dim ++ "03/21 00:00"));
 }
 
 test "printOutput line3 5h usage and time colored independently" {
@@ -667,7 +696,7 @@ test "printOutput line3 5h usage and time colored independently" {
             .resets_at_ms = now_ms + 15 * 60 * 1000, // 15m < 30m → time red
         },
     };
-    try printOutput(&aw.writer, theme, info, null, now_ms, null);
+    try printOutput(&aw.writer, theme, info, null, now_ms, 0, null);
     const out = aw.writer.buffered();
     // Usage (bar + percentage) should be green
     try std.testing.expect(contains(out, theme.green ++ "30%"));
@@ -686,7 +715,7 @@ test "printOutput line3 5h short remaining yellow, usage green" {
             .resets_at_ms = now_ms + 50 * 60 * 1000, // 50m → time yellow
         },
     };
-    try printOutput(&aw.writer, theme, info, null, now_ms, null);
+    try printOutput(&aw.writer, theme, info, null, now_ms, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, theme.green ++ "20%"));
     try std.testing.expect(contains(out, theme.yellow ++ "50m"));
@@ -703,7 +732,7 @@ test "printOutput line3 7d time colored independently" {
             .resets_at_ms = now_ms + 3 * 24 * 3600 * 1000 + 4 * 3600 * 1000, // +3d 4h → time green
         },
     };
-    try printOutput(&aw.writer, theme, info, null, now_ms, null);
+    try printOutput(&aw.writer, theme, info, null, now_ms, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, theme.yellow ++ "60%"));
     try std.testing.expect(contains(out, theme.green ++ "3d 4h"));
@@ -723,7 +752,7 @@ test "printOutput line3 regression: low usage with short remaining must not colo
             .resets_at_ms = now_ms + 11 * 60 * 1000, // +11m
         },
     };
-    try printOutput(&aw.writer, theme, info, null, now_ms, null);
+    try printOutput(&aw.writer, theme, info, null, now_ms, 0, null);
     const out = aw.writer.buffered();
     // Usage 29% must be green, NOT red
     try std.testing.expect(contains(out, theme.green ++ "29%"));
@@ -735,7 +764,7 @@ test "printOutput line3 regression: low usage with short remaining must not colo
 test "printOutput no line3 without rate limits" {
     var aw: Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try printOutput(&aw.writer, theme_default, StdinInfo{}, null, 0, null);
+    try printOutput(&aw.writer, theme_default, StdinInfo{}, null, 0, 0, null);
     // Only 2 newlines (line1 + line2), no line3
     try std.testing.expectEqual(@as(usize, 2), countNewlines(aw.writer.buffered()));
 }
@@ -748,7 +777,7 @@ test "printOutput rate limit usage colors" {
         .rate_limit_5h = .{ .used_percentage = 60.0 }, // 50-79 = yellow
         .rate_limit_7d = .{ .used_percentage = 90.0 }, // >=80 = red
     };
-    try printOutput(&aw.writer, theme, info, null, 0, null);
+    try printOutput(&aw.writer, theme, info, null, 0, 0, null);
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, theme.yellow ++ "60%"));
     try std.testing.expect(contains(out, theme.red ++ "90%"));
