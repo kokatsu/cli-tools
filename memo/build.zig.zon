@@ -2,7 +2,7 @@
     .name = .memo,
     .version = "0.1.0",
     .fingerprint = 0xab4a902aa3b42912,
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
