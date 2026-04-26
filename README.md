@@ -6,7 +6,6 @@
 
 | Tool | Description |
 |---|---|
-| [`cc-filter`](./cc-filter) | Claude Code PreToolUse hook: Bash 出力の圧縮と危険パターン検知 |
 | [`cc-statusline`](./cc-statusline) | Claude Code statusline: git/usage/rate-limit 情報を高速描画 |
 | [`daily`](./daily) | 日記メモツール |
 | [`memo`](./memo) | タイムスタンプ付き単独メモツール |
@@ -17,7 +16,6 @@
 Nix (flakes):
 
 ```sh
-nix build .#cc-filter
 nix build .#cc-statusline
 nix build .#daily
 nix build .#memo
@@ -27,7 +25,7 @@ Dev shell:
 
 ```sh
 nix develop
-cd cc-filter && zig build test
+cd cc-statusline && zig build test
 ```
 
 `just` タスク:

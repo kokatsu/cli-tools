@@ -10,25 +10,13 @@ permissions:
   contents: read
 
 jobs:
-  dangerous-pattern-scan:
-    name: Dangerous pattern scan (cc-filter)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Scan cc-filter for forbidden patterns
-        run: |
-          if grep -rnE 'std\.net|std\.process\.Child|@import\("std"\)\.net|@import\("std"\)\.process\.Child' cc-filter/src/; then
-            echo "::error::cc-filter must not use std.net or std.process.Child (including reflective forms)"
-            exit 1
-          fi
-
   zig-test:
     name: Zig tests (${{ matrix.tool }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        tool: [cc-filter, cc-statusline, daily, memo, zig-util]
+        tool: [cc-statusline, daily, memo, zig-util]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -54,4 +42,4 @@ jobs:
         with:
           name: kokatsu
           authToken: ${{ github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
-      - run: nix build .#cc-filter .#cc-statusline .#daily .#memo
+      - run: nix build .#cc-statusline .#daily .#memo

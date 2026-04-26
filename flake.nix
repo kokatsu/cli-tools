@@ -34,11 +34,6 @@
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
     in {
-      cc-filter = mkZigTool pkgs {
-        pname = "cc-filter";
-        subdir = "cc-filter";
-        optimize = "ReleaseSafe";
-      };
       cc-statusline = mkZigTool pkgs {
         pname = "cc-statusline";
         subdir = "cc-statusline";
@@ -56,7 +51,6 @@
     overlays.default = _final: prev: {
       inherit
         (self.packages.${prev.system})
-        cc-filter
         cc-statusline
         daily
         memo
