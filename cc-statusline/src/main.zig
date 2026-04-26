@@ -74,6 +74,13 @@ fn parseStdin(allocator: std.mem.Allocator, data: []const u8) StdinInfo {
         if (getObjField(rl, "seven_day")) |sd| info.rate_limit_7d = parseRateLimitWindow(sd);
     }
 
+    if (getObjField(root, "agent")) |agent| {
+        if (agent.get("name")) |n| info.agent_name = getStr(n);
+    }
+    if (root.get("exceeds_200k_tokens")) |v| {
+        if (v == .bool) info.exceeds_200k_tokens = v.bool;
+    }
+
     return info;
 }
 
@@ -309,6 +316,44 @@ test "parseStdin cost and line fields" {
     try std.testing.expectEqual(@as(?i64, 150), info.lines_added);
     try std.testing.expectEqual(@as(?i64, 30), info.lines_removed);
     try std.testing.expectEqual(@as(?i64, 60000), info.session_duration_ms);
+}
+
+test "parseStdin agent.name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const input =
+        \\{"agent":{"name":"security-reviewer"}}
+    ;
+    const info = parseStdin(arena.allocator(), input);
+    try std.testing.expectEqualStrings("security-reviewer", info.agent_name.?);
+}
+
+test "parseStdin no agent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const info = parseStdin(arena.allocator(), "{\"model\":{\"id\":\"x\"}}");
+    try std.testing.expectEqual(@as(?[]const u8, null), info.agent_name);
+}
+
+test "parseStdin exceeds_200k_tokens true" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const info = parseStdin(arena.allocator(), "{\"exceeds_200k_tokens\":true}");
+    try std.testing.expectEqual(true, info.exceeds_200k_tokens);
+}
+
+test "parseStdin exceeds_200k_tokens false" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const info = parseStdin(arena.allocator(), "{\"exceeds_200k_tokens\":false}");
+    try std.testing.expectEqual(false, info.exceeds_200k_tokens);
+}
+
+test "parseStdin exceeds_200k_tokens missing defaults to false" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const info = parseStdin(arena.allocator(), "{}");
+    try std.testing.expectEqual(false, info.exceeds_200k_tokens);
 }
 
 test "parseStdin cwd and transcript_path" {

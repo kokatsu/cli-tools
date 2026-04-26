@@ -31,4 +31,6 @@ pub const StdinInfo = struct {
     cwd: ?[]const u8 = null,
     rate_limit_5h: ?RateLimitWindow = null,
     rate_limit_7d: ?RateLimitWindow = null,
+    agent_name: ?[]const u8 = null,
+    exceeds_200k_tokens: bool = false,
 };

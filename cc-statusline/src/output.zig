@@ -31,6 +31,7 @@ const progress_bar_buf_size: usize = 256;
 
 pub const Theme = struct {
     model: []const u8,
+    agent: []const u8,
     green: []const u8,
     yellow: []const u8,
     red: []const u8,
@@ -44,6 +45,7 @@ pub const Theme = struct {
 
 pub const theme_default = Theme{
     .model = "\x1b[36m",
+    .agent = "\x1b[35m",
     .green = "\x1b[32m",
     .yellow = "\x1b[33m",
     .red = "\x1b[31m",
@@ -52,6 +54,7 @@ pub const theme_default = Theme{
 
 pub const theme_catppuccin_mocha = Theme{
     .model = "\x1b[38;2;137;180;250m", // Blue (#89b4fa)
+    .agent = "\x1b[38;2;203;166;247m", // Mauve (#cba6f7)
     .green = "\x1b[38;2;166;227;161m", // Green (#a6e3a1)
     .yellow = "\x1b[38;2;249;226;175m", // Yellow (#f9e2af)
     .red = "\x1b[38;2;243;139;168m", // Red (#f38ba8)
@@ -60,6 +63,7 @@ pub const theme_catppuccin_mocha = Theme{
 
 pub const theme_catppuccin_latte = Theme{
     .model = "\x1b[38;2;30;102;245m",
+    .agent = "\x1b[38;2;136;57;239m", // Mauve (#8839ef)
     .green = "\x1b[38;2;64;160;43m",
     .yellow = "\x1b[38;2;223;142;29m",
     .red = "\x1b[38;2;210;15;57m",
@@ -68,6 +72,7 @@ pub const theme_catppuccin_latte = Theme{
 
 pub const theme_catppuccin_frappe = Theme{
     .model = "\x1b[38;2;140;170;238m",
+    .agent = "\x1b[38;2;202;158;230m", // Mauve (#ca9ee6)
     .green = "\x1b[38;2;166;209;137m",
     .yellow = "\x1b[38;2;229;200;144m",
     .red = "\x1b[38;2;231;130;132m",
@@ -76,6 +81,7 @@ pub const theme_catppuccin_frappe = Theme{
 
 pub const theme_catppuccin_macchiato = Theme{
     .model = "\x1b[38;2;138;173;244m",
+    .agent = "\x1b[38;2;198;160;246m", // Mauve (#c6a0f6)
     .green = "\x1b[38;2;166;218;149m",
     .yellow = "\x1b[38;2;238;212;159m",
     .red = "\x1b[38;2;237;135;150m",
@@ -84,6 +90,7 @@ pub const theme_catppuccin_macchiato = Theme{
 
 pub const ThemeOverrides = struct {
     model: ?[]const u8 = null,
+    agent: ?[]const u8 = null,
     green: ?[]const u8 = null,
     yellow: ?[]const u8 = null,
     red: ?[]const u8 = null,
@@ -104,6 +111,7 @@ pub fn buildTheme(theme_name: ?[]const u8, overrides: ThemeOverrides) Theme {
     } else theme_default;
 
     if (overrides.model) |v| theme.model = v;
+    if (overrides.agent) |v| theme.agent = v;
     if (overrides.green) |v| theme.green = v;
     if (overrides.yellow) |v| theme.yellow = v;
     if (overrides.red) |v| theme.red = v;
@@ -121,6 +129,7 @@ pub fn initTheme(env: *const std.process.Environ.Map) Theme {
         env.get("CC_STATUSLINE_THEME"),
         .{
             .model = env.get("CC_STATUSLINE_COLOR_MODEL"),
+            .agent = env.get("CC_STATUSLINE_COLOR_AGENT"),
             .green = env.get("CC_STATUSLINE_COLOR_GREEN"),
             .yellow = env.get("CC_STATUSLINE_COLOR_YELLOW"),
             .red = env.get("CC_STATUSLINE_COLOR_RED"),
@@ -256,9 +265,15 @@ fn writeRateLimitWindow(w: *Writer, theme: Theme, label: []const u8, rl: RateLim
 }
 
 pub fn printOutput(w: *Writer, theme: Theme, stdin_info: StdinInfo, scan: ?ScanResult, now_ms: i64, utc_offset_s: i32, git_branch: ?[]const u8) !void {
-    // === Line 1: Model + Branch + Context ===
+    // === Line 1: Model + Agent + Branch + Context ===
     const model_name = stdin_info.model_name orelse "Unknown";
     try w.print("\xf0\x9f\xa4\x96 {s}{s}{s}", .{ theme.model, model_name, theme.reset });
+
+    // Subagent indicator
+    if (stdin_info.agent_name) |name| {
+        // 🧩 U+1F9E9
+        try w.print(" {s}|{s} \xf0\x9f\xa7\xa9 {s}{s}{s}", .{ theme.dim, theme.reset, theme.agent, name, theme.reset });
+    }
 
     // Git branch
     if (git_branch) |branch| {
@@ -275,6 +290,11 @@ pub fn printOutput(w: *Writer, theme: Theme, stdin_info: StdinInfo, scan: ?ScanR
         try w.print(" {s}|{s} \xf0\x9f\xa7\xa0 {s}{s}{s} {s}{d:.0}%{s}", .{ theme.dim, theme.reset, color, bar, theme.reset, color, pct, theme.reset });
     } else {
         try w.print(" {s}|{s} \xf0\x9f\xa7\xa0 N/A", .{ theme.dim, theme.reset });
+    }
+
+    // 200K+ pricing tier marker
+    if (stdin_info.exceeds_200k_tokens) {
+        try w.writeAll(" \xf0\x9f\x9a\xa8"); // 🚨 U+1F6A8
     }
 
     try w.writeAll("\n");
@@ -543,6 +563,43 @@ test "printOutput line1 git branch" {
     const out = aw.writer.buffered();
     try std.testing.expect(contains(out, "main"));
     try std.testing.expect(contains(out, "\xf0\x9f\x8c\xbf")); // 🌿
+}
+
+test "printOutput line1 agent name with puzzle emoji" {
+    var aw: Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    const info = StdinInfo{ .model_name = "Opus 4.6", .agent_name = "security-reviewer" };
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
+    const out = aw.writer.buffered();
+    try std.testing.expect(contains(out, "\xf0\x9f\xa7\xa9")); // 🧩
+    try std.testing.expect(contains(out, "security-reviewer"));
+    // Agent name uses theme.agent color
+    try std.testing.expect(contains(out, theme_default.agent ++ "security-reviewer"));
+}
+
+test "printOutput line1 no agent name does not emit puzzle emoji" {
+    var aw: Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    const info = StdinInfo{ .model_name = "Opus 4.6" };
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
+    const out = aw.writer.buffered();
+    try std.testing.expect(!contains(out, "\xf0\x9f\xa7\xa9")); // 🧩
+}
+
+test "printOutput line1 exceeds_200k_tokens shows alarm emoji" {
+    var aw: Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    const info = StdinInfo{ .context_pct = 50.0, .exceeds_200k_tokens = true };
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
+    try std.testing.expect(contains(aw.writer.buffered(), "\xf0\x9f\x9a\xa8")); // 🚨
+}
+
+test "printOutput line1 exceeds_200k_tokens false omits alarm emoji" {
+    var aw: Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    const info = StdinInfo{ .context_pct = 50.0, .exceeds_200k_tokens = false };
+    try printOutput(&aw.writer, theme_default, info, null, 0, 0, null);
+    try std.testing.expect(!contains(aw.writer.buffered(), "\xf0\x9f\x9a\xa8")); // 🚨
 }
 
 // --- printOutput: Line 2 ---

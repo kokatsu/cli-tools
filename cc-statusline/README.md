@@ -7,6 +7,8 @@ A fast statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-co
 ## Features
 
 - **Model & Context** — Current model name, git branch, context window usage with color-coded progress bar (green → yellow → red)
+- **Subagent Indicator** — Shows current subagent name (🧩) when running inside a Claude Code subagent
+- **200K+ Tier Alert** — 🚨 marker when the conversation has exceeded the 200K-token pricing tier
 - **Cost Tracking** — Today's total cost, current block cost (5h window), burn rate per hour
 - **Rate Limits** — 5-hour and 7-day usage percentage with color-coded progress bars and reset countdown
 - **Smart Caching** — Two-tier binary cache (30s result TTL, 5m file list TTL) with incremental diff parsing for near-zero overhead
@@ -64,6 +66,7 @@ Override individual colors with ANSI escape sequences:
 | Variable | Description | Default |
 |---|---|---|
 | `CC_STATUSLINE_COLOR_MODEL` | Model name color | Cyan |
+| `CC_STATUSLINE_COLOR_AGENT` | Subagent name color | Magenta |
 | `CC_STATUSLINE_COLOR_GREEN` | Low context usage | Green |
 | `CC_STATUSLINE_COLOR_YELLOW` | Medium context usage | Yellow |
 | `CC_STATUSLINE_COLOR_RED` | High context usage | Red |
@@ -85,3 +88,9 @@ export CLAUDE_CONFIG_DIR=/path/to/config
 ```sh
 zig build test
 ```
+
+## Acknowledgments
+
+The transcript scanning logic (5-hour block detection, message+request ID
+deduplication, JSONL field mapping) is derived from
+[ccusage](https://github.com/ryoppippi/ccusage) by @ryoppippi (MIT).
