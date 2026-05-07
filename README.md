@@ -6,7 +6,6 @@
 
 | Tool | Description |
 |---|---|
-| [`cc-statusline`](./cc-statusline) | Claude Code statusline: git/usage/rate-limit 情報を高速描画 |
 | [`daily`](./daily) | 日記メモツール |
 | [`memo`](./memo) | タイムスタンプ付き単独メモツール |
 | [`zig-util`](./zig-util) | 共通ユーティリティモジュール (json, time 等) |
@@ -16,7 +15,6 @@
 Nix (flakes):
 
 ```sh
-nix build .#cc-statusline
 nix build .#daily
 nix build .#memo
 ```
@@ -25,7 +23,7 @@ Dev shell:
 
 ```sh
 nix develop
-cd cc-statusline && zig build test
+cd daily && zig build test
 ```
 
 `just` タスク:

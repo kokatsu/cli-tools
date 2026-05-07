@@ -34,10 +34,6 @@
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
     in {
-      cc-statusline = mkZigTool pkgs {
-        pname = "cc-statusline";
-        subdir = "cc-statusline";
-      };
       daily = mkZigTool pkgs {
         pname = "daily";
         subdir = "daily";
@@ -51,7 +47,6 @@
     overlays.default = _final: prev: {
       inherit
         (self.packages.${prev.system})
-        cc-statusline
         daily
         memo
         ;

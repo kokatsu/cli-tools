@@ -1,4 +1,4 @@
-zig_dirs := "cc-statusline daily memo zig-util"
+zig_dirs := "daily memo zig-util"
 
 default:
     @just --list
